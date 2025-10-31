@@ -2,7 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/main.dart'; // Import the global 'supabase' client
 import 'package:supabase_flutter/supabase_flutter.dart'; // Import for Supabase v2 syntax
-import 'package:flutter_application_1/staff_add_page.dart'; 
+import 'package:flutter_application_1/staff_add_page.dart';
 
 class StaffHomePage extends StatefulWidget {
   const StaffHomePage({super.key});
@@ -268,7 +268,11 @@ class _StaffHomePageState extends State<StaffHomePage> {
             padding: const EdgeInsets.symmetric(horizontal: 16.0),
             child: FilledButton.icon(
               onPressed: () {
-                // TODO: Implement add book functionality
+                // Navigate to the StaffAdd page
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const StaffAdd()),
+                );
               },
               icon: const Icon(Icons.add),
               label: const Text('Add Book'),

@@ -252,7 +252,7 @@ class _StudentHomePageState extends State<StudentHomePage> {
                   child: TextField(
                     controller: _searchController,
                     decoration: const InputDecoration(
-                      hintText: 'Search by name...',
+                      hintText: 'Search by name....',
                       prefixIcon: Icon(Icons.search),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.all(Radius.circular(25.0)),

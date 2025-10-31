@@ -69,7 +69,7 @@ class _StudentNotificationsPageState extends State<StudentNotificationsPage> {
             'return_date': '2025-01-01T23:59:00.000Z',
             'asset': {
               'id': -1,
-              'name': 'Mobile application development',
+              'name': 'Mobile application Development',
               'image_url': '', // keep grey box like the mock
             },
           },

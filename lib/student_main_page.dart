@@ -71,7 +71,7 @@ class _StudentMainPageState extends State<StudentMainPage> {
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.logout),
-            label: 'Logout',
+            label: 'Log Out',
           ),
         ],
         currentIndex: _selectedIndex,

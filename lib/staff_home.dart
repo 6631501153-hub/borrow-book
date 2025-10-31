@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/main.dart'; // Import the global 'supabase' client
 import 'package:supabase_flutter/supabase_flutter.dart'; // Import for Supabase v2 syntax
+import 'package:flutter_application_1/staff_add_page.dart'; 
 
 class StaffHomePage extends StatefulWidget {
   const StaffHomePage({super.key});

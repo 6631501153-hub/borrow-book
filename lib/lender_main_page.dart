@@ -24,9 +24,8 @@ class _LenderMainPageState extends State<LenderMainPage> {
     const LenderDashboardPage(), 
     const LenderNotificationsPage(),
     const LenderHistoryPage(),
-    const Center(
-      child: Text('Lender History Page (Coming Soon)'),
-    ), // Index 3: History
+    const LenderHomePage(),
+    // Index 3: History
     
     Container(), // Index 4 (for logout action)
   ];

@@ -210,7 +210,7 @@ class _LenderNotificationsPageState extends State<LenderNotificationsPage> {
                         itemBuilder: (context, i) {
                           final r = (_requests.isEmpty)
                               ? {
-                                  'asset': {'name': 'mobile application deverlopment'},
+                                  'asset': {'name': 'mobile application Deverlopment'},
                                   'asset_id': 'xxxxx',
                                   'borrow_date': null,
                                   'return_due_date': null,

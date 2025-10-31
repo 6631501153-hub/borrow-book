@@ -175,7 +175,7 @@ class _StudentHistoryPageState extends State<StudentHistoryPage> {
                 ),
                 child: Column(
                   children: [
-                    _statLine('total book borrowing:', _totalBorrowed),
+                    _statLine('total book borrowing :', _totalBorrowed),
                     const SizedBox(height: 4),
                     _statLine('currently borrowing :', _currentlyBorrowing),
                   ],

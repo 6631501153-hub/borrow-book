@@ -64,7 +64,7 @@ class _StudentNotificationsPageState extends State<StudentNotificationsPage> {
         _requests = [
           {
             'id': -1,
-            'status': 'pending',
+            'status': 'pending ',
             'borrow_date': '2025-01-01T23:59:00.000Z',
             'return_date': '2025-01-01T23:59:00.000Z',
             'asset': {

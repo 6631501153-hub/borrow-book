@@ -1,4 +1,4 @@
-// lib/student_main_page.dart
+// // lib/student_main_page.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/login.dart'; // To go back to login on logout
 import 'package:flutter_application_1/main.dart'; // For supabase
@@ -71,7 +71,7 @@ class _StudentMainPageState extends State<StudentMainPage> {
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.logout),
-            label: 'Log Out',
+            label: 'Logout',
           ),
         ],
         currentIndex: _selectedIndex,
@@ -84,3 +84,4 @@ class _StudentMainPageState extends State<StudentMainPage> {
     );
   }
 }
+

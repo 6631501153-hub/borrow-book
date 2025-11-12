@@ -4,11 +4,13 @@ import 'package:flutter_application_1/main.dart'; // Import the global 'supabase
 
 // --- THIS IS THE FIX ---
 // Add imports for all your pages
-import 'package:flutter_application_1/student_main_page.dart'; // <-- For students
-import 'package:flutter_application_1/lender_main_page.dart';
+import 'package:flutter_application_1/student_main_page.dart' as student_page; // <-- For students
 import 'package:flutter_application_1/signup.dart'; 
-import 'package:flutter_application_1/staff_main_page.dart';
+
 // --- END OF FIX ---
+
+
+    
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -18,158 +20,172 @@ class LoginPage extends StatefulWidget {
 }
 
 class _LoginPageState extends State<LoginPage> {
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
 
-  bool _isLoading = false;
-  bool _isPasswordObscured = true; 
+  final _emailCtrl = TextEditingController();
+  final _pwCtrl = TextEditingController();
 
-  Future<void> _signInAndNavigate() async {
-    setState(() {
-      _isLoading = true;
-    });
+  bool _hidePw = true;
+  bool _loading = false;
 
+  @override
+  void dispose() {
+    _emailCtrl.dispose();
+    _pwCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _login() async {
+    final form = _formKey.currentState!;
+    if (!form.validate()) return;
+
+    setState(() => _loading = true);
     try {
-      // 1. Sign in the user
-      final authResponse = await supabase.auth.signInWithPassword(
-        email: _emailController.text.trim(),
-        password: _passwordController.text.trim(),
+      // Sign in with Supabase Auth
+      await supabase.auth.signInWithPassword(
+        email: _emailCtrl.text.trim(),
+        password: _pwCtrl.text.trim(),
       );
-      
-      final userId = authResponse.user?.id;
-      if (userId == null) {
-        throw Exception('Login successful, but no user ID found.');
-      }
 
-      // 2. Fetch the user's role from your 'users' table
-      final userProfile = await supabase
-          .from('users')
-          .select('role')
-          .eq('id', userId)
-          .single();
-      
-      final role = userProfile['role'];
-
-      // 3. Navigate based on the role
-      if (mounted) {
-        switch (role) {
-          // --- THIS IS THE FIX ---
-          case 'student':
-            Navigator.of(context).pushReplacement(
-              // Go to the main page with the nav bar
-              MaterialPageRoute(builder: (context) => const StudentMainPage()), 
-            );
-            break;
-          // --- END OF FIX ---
-          case 'lender':
-            Navigator.of(context).pushReplacement(
-              // CORRECT: This page has the Scaffold
-              MaterialPageRoute(builder: (context) => const LenderMainPage()), 
-            );
-            break;
-          case 'staff':
-            Navigator.of(context).pushReplacement(
-              MaterialPageRoute(builder: (context) => const StaffMainPage()),
-            );
-            break;
-          default:
-            _showErrorDialog('Unknown role: $role');
-        }
-      }
-
-    } catch (error) {
-      _showErrorDialog('Login failed: ${error.toString()}');
-    }
-
-    if (mounted) {
-      setState(() {
-        _isLoading = false;
-      });
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const student_page.StudentMainPage()),
+      );
+    } catch (e) {
+      _alert(e.toString());
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
-  void _showErrorDialog(String message) {
-    if (mounted) {
-      showDialog(
-        context: context,
-        builder: (context) {
-          return AlertDialog(
-            title: const Text('Alert'),
-            content: Text(message),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('OK'),
-              ),
-            ],
-          );
-        },
-      );
-    }
+  void _alert(String msg) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Alert'),
+        content: Text(msg),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          )
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    const bg = Color(0xFFF6F2F7); // soft pastel like your screenshot
+
     return Scaffold(
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(32.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.book, size: 80),
-              const SizedBox(height: 20),
+      backgroundColor: bg,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 16),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 440),
+              child: Form(
+                key: _formKey,
+                child: Column(
+                  children: [
+                    const SizedBox(height: 32),
+                    const Icon(Icons.bookmark, size: 80, color: Colors.black87),
+                    const SizedBox(height: 36),
 
-              TextField(
-                controller: _emailController,
-                decoration: const InputDecoration(labelText: 'Email'),
-                keyboardType: TextInputType.emailAddress,
-              ),
-              const SizedBox(height: 12),
-
-              TextField(
-                controller: _passwordController,
-                obscureText: _isPasswordObscured, 
-                decoration: InputDecoration(
-                  labelText: 'Password',
-                  suffixIcon: IconButton(
-                    icon: Icon(
-                      _isPasswordObscured
-                          ? Icons.visibility_off
-                          : Icons.visibility,
+                    // Email
+                    TextFormField(
+                      controller: _emailCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Email',
+                        border: UnderlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.emailAddress,
+                      textInputAction: TextInputAction.next,
+                      validator: (v) =>
+                          (v == null || v.trim().isEmpty) ? 'Required' : null,
                     ),
-                    onPressed: () {
-                      setState(() {
-                        _isPasswordObscured = !_isPasswordObscured;
-                      });
-                    },
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
+                    const SizedBox(height: 20),
 
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  minimumSize: const Size(double.infinity, 50),
+                    // Password
+                    TextFormField(
+                      controller: _pwCtrl,
+                      obscureText: _hidePw,
+                      decoration: InputDecoration(
+                        labelText: 'Password',
+                        border: const UnderlineInputBorder(),
+                        suffixIcon: IconButton(
+                          icon: Icon(
+                            _hidePw ? Icons.visibility_off : Icons.visibility,
+                          ),
+                          onPressed: () => setState(() => _hidePw = !_hidePw),
+                        ),
+                      ),
+                      validator: (v) =>
+                          (v == null || v.isEmpty) ? 'Required' : null,
+                    ),
+                    const SizedBox(height: 28),
+
+                    // Log in button (pill shape)
+                    SizedBox(
+                      width: double.infinity,
+                      height: 54,
+                      child: ElevatedButton(
+                        onPressed: _loading ? null : _login,
+                        style: ElevatedButton.styleFrom(
+                          shape: const StadiumBorder(),
+                          elevation: 0,
+                          backgroundColor: Colors.white.withOpacity(0.7),
+                          foregroundColor: const Color(0xFF5A4FBF),
+                          textStyle: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        child: _loading
+                            ? const SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Text('Log in'),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Create new account
+                    TextButton(
+                      onPressed: _loading
+                          ? null
+                          : () => Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => const SignUpPage(),
+                                ),
+                              ),
+                      child: const Text(
+                        'Create new account',
+                        style: TextStyle(
+                          color: Color(0xFF5A4FBF),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 8),
+                  ],
                 ),
-                onPressed: _isLoading ? null : _signInAndNavigate,
-                child: _isLoading
-                    ? const CircularProgressIndicator()
-                    : const Text('Log in'),
               ),
-              
-              TextButton(
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(builder: (context) => const SignUpPage()),
-                  );
-                },
-                child: const Text('Create new account'),
-              ),
-            ],
+            ),
           ),
         ),
       ),
     );
   }
 }
+
+
+
+
+
+

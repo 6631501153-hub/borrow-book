@@ -1,24 +1,22 @@
 // lib/main.dart
 import 'package:flutter/material.dart';
-import 'package:flutter_application_1/login.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:flutter_application_1/signup.dart';
- // <-- Fixed import
+import 'package:flutter_application_1/login.dart';      // your login screen
+// import 'package:flutter_application_1/sign_up_page.dart'; // use this instead if you want to start at SignUpPage
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // ⚠️ --- PASTE YOUR URL AND ANON KEY HERE --- ⚠️
+  // Initialize Supabase
   await Supabase.initialize(
-    url: 'https://wjlgarghubrdrnzresym.supabase.co',
-    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndqbGdhcmdodWJyZHJuenJlc3ltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE3MjM1ODksImV4cCI6MjA3NzI5OTU4OX0.xvB1FWm4bbFI6y6qgqLg2itwkmz50XO-WMwq1XLZUUM',
+    url: 'https://kmmunkvmbrfhoedeancl.supabase.co',     // 🔹 Replace with your Supabase URL
+    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImttbXVua3ZtYnJmaG9lZGVhbmNsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIxODg2NTMsImV4cCI6MjA3Nzc2NDY1M30.KqAWue0NjnZEtnsP78d8aXNX5Db6FyBYuKTmbf8R_pU',               // 🔹 Replace with your anon key
   );
-  // ⚠️ --- (Find this in Supabase: Settings > API > Project API keys) --- ⚠️
 
   runApp(const MyApp());
 }
 
-// Get a global reference to the Supabase client
+// Create a global Supabase client to access anywhere
 final supabase = Supabase.instance.client;
 
 class MyApp extends StatelessWidget {
@@ -26,9 +24,18 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
-      title: 'Borrow App',
-      home: LoginPage(), // <-- Fixed class name
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Asset Borrowing System',
+      theme: ThemeData(
+        primarySwatch: Colors.deepPurple,
+        scaffoldBackgroundColor: const Color(0xFFF6F2F7),
+        inputDecorationTheme: const InputDecorationTheme(
+          labelStyle: TextStyle(color: Colors.black87),
+        ),
+      ),
+      home: const LoginPage(), // or const SignUpPage()
     );
   }
 }
+

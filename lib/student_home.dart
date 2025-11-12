@@ -1,10 +1,8 @@
-
 // lib/student_home.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/main.dart';
-import 'package:flutter_application_1/asset_details_page.dart'; // Import the global 'supabase' client
+import 'package:flutter_application_1/asset_details_page.dart';
 
-// --- 1. Student Home Page (Stateful Widget) ---
 class StudentHomePage extends StatefulWidget {
   const StudentHomePage({super.key});
 
@@ -12,365 +10,320 @@ class StudentHomePage extends StatefulWidget {
   State<StudentHomePage> createState() => _StudentHomePageState();
 }
 
-// --- 2. The State Class (Contains all the logic) ---
 class _StudentHomePageState extends State<StudentHomePage> {
-  bool _isLoading = true;
-  List<Map<String, dynamic>> _assets = []; // Master list from database
-  List<Map<String, dynamic>> _filteredAssets = []; // List to display on screen
+  final _searchCtrl = TextEditingController();
 
-  // State variables for filtering and searching
-  final TextEditingController _searchController = TextEditingController();
-  String? _selectedCategory;
-  String? _selectedStatus;
-  bool _isSortedAZ = false; // Tracks if sorting is active
+  bool _loading = true;
+  String? _error;
 
-  // Dynamic list for categories, loaded from Supabase
-  List<String> _categoryNames = [];
-  // Static list for statuses
-  final List<String> _statuses = ['available', 'borrowed', 'pending', 'disable'];
+  /// all assets from DB and the filtered set to render
+  List<Map<String, dynamic>> _all = [];
+  List<Map<String, dynamic>> _shown = [];
+
+  /// filters / sort
+  String? _statusFilter;              // null => all
+  String? _categoryFilter;            // null => all
+  bool _sortAsc = true;
+
+  /// dynamic categories (from DB)
+  List<String> _categories = [];
+  /// allowed statuses (UI)
+  static const List<String> _statuses = [
+    'available', 'borrowed', 'pending', 'disabled'
+  ];
 
   @override
   void initState() {
     super.initState();
-    // Add listener for the search bar
-    _searchController.addListener(_runFilters);
-    // Fetch initial data from Supabase
-    _loadInitialData();
+    _searchCtrl.addListener(_applyFilters);
+    _load();
   }
 
   @override
   void dispose() {
-    // Clean up the controller when the widget is removed
-    _searchController.removeListener(_runFilters);
-    _searchController.dispose();
+    _searchCtrl.removeListener(_applyFilters);
+    _searchCtrl.dispose();
     super.dispose();
   }
 
-  /// Fetches both assets and categories from Supabase at the same time.
-  Future<void> _loadInitialData() async {
+  // ---------------------- Data ----------------------
+
+  Future<void> _load() async {
+    setState(() { _loading = true; _error = null; });
     try {
-      // Run both fetches in parallel
-      await Future.wait([
-        _fetchAssets(),
-        _fetchCategories(),
-      ]);
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error loading data: $error')),
-        );
-      }
+      // Join category name via FK (asset.category_id -> categories.id)
+      final rows = await supabase
+          .from('asset')
+          .select('id,name,status,image_url,category:categories(name)')
+          .order('name', ascending: true);
+
+      final list = (rows as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .map((m) => {
+                'id'        : m['id'],
+                'name'      : m['name'],
+                'image_url' : (m['image_url'] ?? '').toString(),
+                'status'    : _normalizeStatus((m['status'] ?? '').toString()),
+                'category'  : (m['category'] is Map && (m['category']?['name']) != null)
+                    ? m['category']['name'].toString()
+                    : null,
+              })
+          .toList();
+
+      _all = list;
+
+      // collect distinct categories for filter
+      _categories = _all
+          .map((m) => (m['category'] ?? '') as String)
+          .where((s) => s.isNotEmpty)
+          .toSet()
+          .toList()
+        ..sort();
+
+      _applyFilters();
+    } catch (e) {
+      _error = e.toString();
     } finally {
-      // Stop the loading indicator only after all data is fetched
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) setState(() => _loading = false);
     }
   }
 
-  /// Fetches the list of assets from the 'asset' table.
-  Future<void> _fetchAssets() async {
-    final response = await supabase.from('asset').select();
-    _assets = List<Map<String, dynamic>>.from(response);
-    _filteredAssets = _assets; // Initially, show all assets
+  String _normalizeStatus(String s) {
+    final v = s.toLowerCase();
+    return v == 'disable' ? 'disabled' : v;
   }
 
-  /// Fetches the list of categories from the 'categories' table.
-  Future<void> _fetchCategories() async {
-    final response = await supabase.from('categories').select('name');
-    
-    // Convert list of maps [{'name': 'Fiction'},...] to list of strings ['Fiction',...]
-    _categoryNames =
-        response.map((category) => category['name'] as String).toList();
-  }
+  void _applyFilters() {
+    final q = _searchCtrl.text.trim().toLowerCase();
+    var list = List<Map<String, dynamic>>.from(_all);
 
-  /// Toggles the A-Z sort state and re-runs the filters.
-  void _toggleSort() {
-    setState(() {
-      _isSortedAZ = !_isSortedAZ; // Flip the boolean
+    // search
+    if (q.isNotEmpty) {
+      list = list
+          .where((m) => (m['name'] ?? '')
+              .toString()
+              .toLowerCase()
+              .contains(q))
+          .toList();
+    }
+
+    // status
+    if (_statusFilter != null) {
+      list = list.where((m) => m['status'] == _statusFilter).toList();
+    }
+
+    // category
+    if (_categoryFilter != null) {
+      list = list.where((m) => (m['category'] ?? '') == _categoryFilter).toList();
+    }
+
+    // sort
+    list.sort((a, b) {
+      final an = (a['name'] ?? '').toString().toLowerCase();
+      final bn = (b['name'] ?? '').toString().toLowerCase();
+      return _sortAsc ? an.compareTo(bn) : bn.compareTo(an);
     });
-    _runFilters(); // Re-apply filters and sorting
+
+    setState(() => _shown = list);
   }
 
-  /// Applies all active filters (search, category, status) and sorting.
-  void _runFilters() {
-    List<Map<String, dynamic>> results = _assets;
-    final searchText = _searchController.text.toLowerCase();
-
-    // 1. Filter by Search Text (Name)
-    if (searchText.isNotEmpty) {
-      results = results.where((asset) {
-        final name = asset['name']?.toString().toLowerCase() ?? '';
-        return name.contains(searchText);
-      }).toList();
-    }
-
-    // 2. Filter by Category
-    if (_selectedCategory != null) {
-      results = results.where((asset) {
-        return asset['category'] == _selectedCategory;
-      }).toList();
-    }
-
-    // 3. Filter by Status
-    if (_selectedStatus != null) {
-      results = results.where((asset) {
-        return asset['status'] == _selectedStatus;
-      }).toList();
-    }
-
-    // 4. Apply Sorting (after filtering)
-    if (_isSortedAZ) {
-      results.sort((a, b) {
-        final nameA = a['name']?.toString().toLowerCase() ?? '';
-        final nameB = b['name']?.toString().toLowerCase() ?? '';
-        return nameA.compareTo(nameB); // Sorts A-Z
-      });
-    }
-
-    // Update the UI with the final list
-    setState(() {
-      _filteredAssets = results;
-    });
-  }
-
-  /// Displays the pop-up modal for filtering.
-  void _showFilterModal() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true, // Allows modal to adjust for the keyboard
-      builder: (context) {
-        // StatefulBuilder allows the modal to update its own state
-        return StatefulBuilder(
-          builder: (BuildContext context, StateSetter setModalState) {
-            return Padding(
-              // Add padding to avoid the keyboard
-              padding: EdgeInsets.only(
-                bottom: MediaQuery.of(context).viewInsets.bottom,
-                left: 24,
-                right: 24,
-                top: 24,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Filter Assets',
-                      style:
-                          TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 16),
-                  
-                  // Category Filter Dropdown (Dynamic)
-                  DropdownButtonFormField<String>(
-                    value: _selectedCategory,
-                    hint: const Text('Filter by Category'),
-                    onChanged: (value) {
-                      setModalState(() {
-                        _selectedCategory = value;
-                      });
-                    },
-                    // Use the dynamic list from Supabase
-                    items: _categoryNames.map((category) {
-                      return DropdownMenuItem(
-                        value: category,
-                        child: Text(category),
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Status Filter Dropdown (Static)
-                  DropdownButtonFormField<String>(
-                    value: _selectedStatus,
-                    hint: const Text('Filter by Status'),
-                    onChanged: (value) {
-                      setModalState(() {
-                        _selectedStatus = value;
-                      });
-                    },
-                    items: _statuses.map((status) {
-                      return DropdownMenuItem(
-                        value: status,
-                        child: Text(status),
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Action Buttons (Clear & Apply)
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      TextButton(
-                        onPressed: () {
-                          // Clear filters in the modal
-                          setModalState(() {
-                            _selectedCategory = null;
-                            _selectedStatus = null;
-                          });
-                          // Re-run filters and close modal
-                          _runFilters();
-                          Navigator.pop(context);
-                        },
-                        child: const Text('Clear'),
-                      ),
-                      const SizedBox(width: 8),
-                      FilledButton(
-                        onPressed: () {
-                          // Apply filters and close modal
-                          _runFilters();
-                          Navigator.pop(context);
-                        },
-                        child: const Text('Apply'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16), // Bottom padding
-                ],
-              ),
-            );
-          },
-        );
-      },
+  Future<void> _openDetails(Map<String, dynamic> asset) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => AssetDetailsPage(asset: asset)),
     );
+    // When returning, reload from DB to reflect new statuses (e.g., pending)
+    await _load();
   }
 
-  // --- Main Build Method ---
+  // ---------------------- UI ----------------------
+
   @override
   Widget build(BuildContext context) {
-    // SafeArea prevents UI from going under status bar (time, battery)
-    return SafeArea(
-      child: Column(
+    const bg = Color(0xFFF6F2F7);
+    return Scaffold(
+      backgroundColor: bg,
+      appBar: AppBar(
+        title: const Text('Student'),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        foregroundColor: Colors.black87,
+      ),
+      body: Column(
         children: [
-          // --- Top Bar (Search, Filter, Sort) ---
+          // Search + Filter + Sort
           Padding(
-            padding: const EdgeInsets.all(16.0),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Row(
               children: [
-                // Search Bar
                 Expanded(
-                  child: TextField(
-                    controller: _searchController,
-                    decoration: const InputDecoration(
-                      hintText: 'Search by name.....',
-                      prefixIcon: Icon(Icons.search),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.all(Radius.circular(25.0)),
-                      ),
+                  child: Container(
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: Colors.black12.withOpacity(.1),
+                      borderRadius: BorderRadius.circular(22),
+                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.search, size: 22, color: Colors.black87),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextField(
+                            controller: _searchCtrl,
+                            decoration: const InputDecoration(
+                              hintText: 'Search',
+                              border: InputBorder.none,
+                            ),
+                            onChanged: (_) => _applyFilters(),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                // Filter Button
+                const SizedBox(width: 12),
                 IconButton(
-                  icon: const Icon(Icons.filter_list),
-                  onPressed: _showFilterModal,
+                  tooltip: 'Filter',
+                  icon: const Icon(Icons.filter_alt_outlined),
+                  onPressed: () async {
+                    final res = await showModalBottomSheet<_FilterResult>(
+                      context: context,
+                      builder: (_) => _FilterSheet(
+                        categories: _categories,
+                        statuses: _statuses,
+                        currentCategory: _categoryFilter,
+                        currentStatus: _statusFilter,
+                      ),
+                    );
+                    if (res != null) {
+                      setState(() {
+                        _categoryFilter = res.category;
+                        _statusFilter = res.status;
+                      });
+                      _applyFilters();
+                    }
+                  },
                 ),
-                
-                // Sort Button
                 IconButton(
-                  icon: Icon(
-                    Icons.sort_by_alpha,
-                    // Change color when active
-                    color: _isSortedAZ 
-                           ? Theme.of(context).primaryColor 
-                           : Colors.grey,
-                  ),
-                  onPressed: _toggleSort,
+                  tooltip: 'Sort A–Z',
+                  icon: const Icon(Icons.sort_by_alpha),
+                  onPressed: () {
+                    setState(() => _sortAsc = !_sortAsc);
+                    _applyFilters();
+                  },
                 ),
               ],
             ),
           ),
-          
-          // --- Asset Grid ---
-          _isLoading
-              // Show loading spinner
-              ? const Expanded(child: Center(child: CircularProgressIndicator()))
-              // Show the grid
-              : Expanded(
-                  child: GridView.builder(
-                    padding: const EdgeInsets.all(8.0),
-                    gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 2, // 2 items per row
-                      childAspectRatio: 0.8, // Adjust height
-                      crossAxisSpacing: 8,
-                      mainAxisSpacing: 8,
-                    ),
-                    // Use the filtered list
-                    itemCount: _filteredAssets.length,
-                    itemBuilder: (context, index) {
-                      final asset = _filteredAssets[index];
-                      // Pass data to the custom card widget
-                      return AssetCard(asset: asset);
-                    },
-                  ),
-                ),
+
+          Expanded(child: _buildBody()),
         ],
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Text('Error: $_error', style: const TextStyle(color: Colors.red)),
+        ),
+      );
+    }
+    if (_shown.isEmpty) return const Center(child: Text('No assets yet.'));
+
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: GridView.builder(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 2, mainAxisSpacing: 18, crossAxisSpacing: 18, childAspectRatio: 0.9),
+        itemCount: _shown.length,
+        itemBuilder: (_, i) => _AssetCard(
+          asset: _shown[i],
+          onTap: () => _openDetails(_shown[i]),
+        ),
       ),
     );
   }
 }
 
-// --- 3. Custom Widget for the Asset Card ---
-class AssetCard extends StatelessWidget {
+class _AssetCard extends StatelessWidget {
   final Map<String, dynamic> asset;
-  const AssetCard({super.key, required this.asset});
+  final VoidCallback onTap;
+  const _AssetCard({required this.asset, required this.onTap});
+
+  Color _badge(String s) {
+    switch (s) {
+      case 'available': return const Color(0xFF43A047); // green
+      case 'borrowed' : return const Color(0xFF1E88E5); // blue
+      case 'pending'  : return const Color(0xFFF9A825); // amber
+      case 'disabled' : return const Color(0xFFE53935); // red
+      default         : return Colors.grey;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final imageUrl = asset['image_url'];
-    final status = asset['status'] ?? 'unknown';
+    final status = (asset['status'] ?? '').toString();
+    final img = (asset['image_url'] ?? '').toString();
 
-    return GestureDetector(
-      onTap: () {
-        // --- THIS IS THE LINE TO CHANGE ---
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => AssetDetailsPage(asset: asset),
-          ),
-        );
-        // --- END OF CHANGE ---
-      },
-      child: Card(
-        elevation: 2,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.lightBlue.withOpacity(0.06),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // --- Image ---
+            // image
             Expanded(
               child: Container(
                 decoration: BoxDecoration(
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(12),
-                    topRight: Radius.circular(12),
-                  ),
-                  color: Colors.grey[300],
+                  color: Colors.grey[400],
+                  borderRadius: BorderRadius.circular(6),
                 ),
-                // Show image or placeholder icon
-                child: (imageUrl != null && imageUrl.isNotEmpty)
-                    ? Image.network(imageUrl, fit: BoxFit.cover)
-                    : const Icon(Icons.inventory_2, size: 50, color: Colors.grey),
+                child: img.isNotEmpty
+                    ? ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: Image.network(img, fit: BoxFit.cover),
+                      )
+                    : const Icon(Icons.image, size: 48, color: Colors.white),
               ),
             ),
-            
-            // --- Title & Status ---
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: Column(
-                children: [
-                  // --- Title ---
-                  Text(
-                    asset['name'] ?? 'No Name',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 4),
-                  // --- Status Tag ---
-                  StatusTag(status: status),
-                ],
+            const SizedBox(height: 10),
+
+            // name
+            Text(
+              (asset['name'] ?? 'Unnamed').toString(),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+
+            // status pill
+            Align(
+              alignment: Alignment.center,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _badge(status),
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: Text(
+                  status,
+                  style: const TextStyle(
+                    color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600),
+                ),
               ),
             ),
           ],
@@ -380,43 +333,88 @@ class AssetCard extends StatelessWidget {
   }
 }
 
-// --- 4. Custom Widget for the Status Tag ---
-class StatusTag extends StatelessWidget {
-  final String status;
-  const StatusTag({super.key, required this.status});
+/// Bottom sheet for filters
+class _FilterSheet extends StatefulWidget {
+  final List<String> categories;
+  final List<String> statuses;
+  final String? currentCategory;
+  final String? currentStatus;
+  const _FilterSheet({
+    required this.categories,
+    required this.statuses,
+    required this.currentCategory,
+    required this.currentStatus,
+  });
 
-  // Get color based on status
-  Color _getColor(String status) {
-    switch (status) {
-      case 'available':
-        return Colors.green;
-      case 'borrowed':
-        return Colors.blue;
-      case 'pending':
-        return Colors.orange;
-      case 'disable':
-        return Colors.red;
-      default:
-        return Colors.grey;
-    }
+  @override
+  State<_FilterSheet> createState() => _FilterSheetState();
+}
+
+class _FilterSheetState extends State<_FilterSheet> {
+  String? _cat;
+  String? _st;
+
+  @override
+  void initState() {
+    super.initState();
+    _cat = widget.currentCategory;
+    _st  = widget.currentStatus;
   }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: _getColor(status).withOpacity(0.2),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Text(
-        status, // "available", "borrowed", etc.
-        style: TextStyle(
-          color: _getColor(status),
-          fontWeight: FontWeight.bold,
-          fontSize: 12,
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Filter Assets',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<String>(
+              value: _cat,
+              hint: const Text('Category'),
+              items: [
+                const DropdownMenuItem(value: null, child: Text('All')),
+                ...widget.categories.map((c) => DropdownMenuItem(value: c, child: Text(c))),
+              ],
+              onChanged: (v) => setState(() => _cat = v),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              value: _st,
+              hint: const Text('Status'),
+              items: [
+                const DropdownMenuItem(value: null, child: Text('All')),
+                ...widget.statuses.map((s) => DropdownMenuItem(value: s, child: Text(s))),
+              ],
+              onChanged: (v) => setState(() => _st = v),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, const _FilterResult(null, null)),
+                  child: const Text('Clear'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: () => Navigator.pop(context, _FilterResult(_cat, _st)),
+                  child: const Text('Apply'),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );
   }
+}
+
+class _FilterResult {
+  final String? category;
+  final String? status;
+  const _FilterResult(this.category, this.status);
 }

@@ -1,7 +1,5 @@
-// lib/signup.dart
 import 'package:flutter/material.dart';
-import 'package:flutter_application_1/main.dart'; // Import the global 'supabase' client
-import 'package:flutter_application_1/student_main_page.dart'; // Import the StudentMainPage
+import 'package:flutter_application_1/main.dart'; // global 'supabase' client
 
 class SignUpPage extends StatefulWidget {
   const SignUpPage({super.key});
@@ -11,191 +9,248 @@ class SignUpPage extends StatefulWidget {
 }
 
 class _SignUpPageState extends State<SignUpPage> {
-  // --- CHANGED --- Renamed _usernameController
-  final _nameController = TextEditingController();
-  final _studentIdController = TextEditingController(); // <-- Renamed
-  final _passwordController = TextEditingController();
-  final _confirmPasswordController = TextEditingController();
-  final _emailController = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
+
+  final _nameCtrl = TextEditingController();
+  final _studentIdCtrl = TextEditingController();
+  final _emailCtrl = TextEditingController();
+  final _pwCtrl = TextEditingController();
+  final _pw2Ctrl = TextEditingController();
 
   bool _isLoading = false;
-  bool _isPasswordObscured = true;
-  bool _isConfirmPasswordObscured = true;
+  bool _hidePw = true;
+  bool _hidePw2 = true;
 
-  Future<void> _onSignUpPressed() async {
-    if (_passwordController.text != _confirmPasswordController.text) {
-      _showErrorDialog('Passwords do not match.');
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _studentIdCtrl.dispose();
+    _emailCtrl.dispose();
+    _pwCtrl.dispose();
+    _pw2Ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _signUp() async {
+    final form = _formKey.currentState!;
+    if (!form.validate()) return;
+
+    if (_pwCtrl.text != _pw2Ctrl.text) {
+      _alert('Passwords do not match.');
       return;
     }
 
-    setState(() {
-      _isLoading = true;
-    });
-
-    // --- CHANGED --- Pass the student ID to the function
-    final error = await _handleStudentSignUp(
-      email: _emailController.text.trim(),
-      password: _passwordController.text.trim(),
-      name: _nameController.text.trim(),
-      studentId: _studentIdController.text.trim(), // <-- Renamed
-    );
-
-    setState(() {
-      _isLoading = false;
-    });
-
-    if (error == null) {
-      if (mounted) {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (context) => const StudentMainPage()),
-        );
-      }
-    } else {
-      _showErrorDialog(error);
-    }
-  }
-
-  // --- CHANGED --- Updated the function parameter and insert query
-  Future<String?> _handleStudentSignUp({
-    required String email,
-    required String password,
-    required String name,
-    required String studentId, // <-- Renamed
-  }) async {
+    setState(() => _isLoading = true);
     try {
-      final authResponse = await supabase.auth.signUp(
-        email: email,
-        password: password,
-      );
-      final newUserId = authResponse.user?.id;
-
-      if (newUserId != null) {
-        await supabase.from('users').insert({
-          'id': newUserId,
-          'university_id': studentId, // <-- Renamed (Database column)
-          'name': name,
-          'role': 'student' 
-        });
-        debugPrint('Student sign up successful!');
-        return null; 
-      }
-      return 'Sign up complete, but no user ID returned.';
-    } catch (e) {
-      debugPrint('Error during student sign up: $e');
-      return e.toString(); 
-    }
-  }
-
-  void _showErrorDialog(String message) {
-    if (mounted) {
-      showDialog(
-        context: context,
-        builder: (context) {
-          return AlertDialog(
-            title: const Text('Alert'),
-            content: Text(message),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('OK'),
-              ),
-            ],
-          );
+      // 1) Sign up with Supabase Auth and include metadata.
+      //    Your DB trigger on auth.users will copy these into public.users
+      //    and link via the same UUID (FK).
+      await supabase.auth.signUp(
+        email: _emailCtrl.text.trim(),
+        password: _pwCtrl.text.trim(),
+        data: {
+          'name': _nameCtrl.text.trim(),
+          'university_id': _studentIdCtrl.text.trim(),
         },
       );
+
+      if (!mounted) return;
+
+      // 2) Tell the user and go back to Sign In
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Account created. Please sign in.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+
+      Navigator.of(context).pop(); // back to Sign In page
+    } catch (e) {
+      _alert(e.toString());
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  void _alert(String msg) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Alert'),
+        content: Text(msg),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String? _required(String? v) =>
+      (v == null || v.trim().isEmpty) ? 'Required' : null;
+
+  String? _emailValidator(String? v) {
+    if (v == null || v.trim().isEmpty) return 'Required';
+    final email = v.trim();
+    final ok = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$').hasMatch(email);
+    return ok ? null : 'Invalid email';
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(32.0),
-          child: Column(
-            mainAxisAlignment:MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.person, size: 80),
-              const SizedBox(height: 20),
-              TextField(
-                controller: _nameController,
-                decoration: const InputDecoration(labelText: 'Name'),
-              ),
-              const SizedBox(height: 12),
+    const bgColor = Color(0xFFF6F2F7); // pastel background
 
-              // --- CHANGED --- Updated controller and label
-              TextField(
-                controller: _studentIdController, // <-- Renamed
-                decoration: const InputDecoration(labelText: 'Student ID'), // <-- Renamed
-              ),
-              const SizedBox(height: 12),
-              
-              TextField(
-                controller: _emailController,
-                decoration: const InputDecoration(labelText: 'Email'),
-                keyboardType: TextInputType.emailAddress,
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _passwordController,
-                obscureText: _isPasswordObscured,
-                decoration: InputDecoration(
-                  labelText: 'Password',
-                  suffixIcon: IconButton(
-                    icon: Icon(
-                      _isPasswordObscured
-                          ? Icons.visibility_off
-                          : Icons.visibility,
+    return Scaffold(
+      backgroundColor: bgColor,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 16),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 440),
+              child: Form(
+                key: _formKey,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const SizedBox(height: 8),
+                    const Icon(Icons.person, size: 80, color: Colors.black87),
+                    const SizedBox(height: 28),
+
+                    // Name
+                    TextFormField(
+                      controller: _nameCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Name',
+                        border: UnderlineInputBorder(),
+                      ),
+                      textInputAction: TextInputAction.next,
+                      validator: _required,
                     ),
-                    onPressed: () {
-                      setState(() {
-                        _isPasswordObscured = !_isPasswordObscured;
-                      });
-                    },
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _confirmPasswordController,
-                obscureText: _isConfirmPasswordObscured,
-                decoration: InputDecoration(
-                  labelText: 'Confirm password',
-                  suffixIcon: IconButton(
-                    icon: Icon(
-                      _isConfirmPasswordObscured
-                          ? Icons.visibility_off
-                          : Icons.visibility,
+                    const SizedBox(height: 12),
+
+                    // Student ID
+                    TextFormField(
+                      controller: _studentIdCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Student ID',
+                        border: UnderlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                      textInputAction: TextInputAction.next,
+                      validator: _required,
                     ),
-                    onPressed: () {
-                      setState(() {
-                        _isConfirmPasswordObscured =
-                            !_isConfirmPasswordObscured;
-                      });
-                    },
-                  ),
+                    const SizedBox(height: 12),
+
+                    // Email
+                    TextFormField(
+                      controller: _emailCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Email',
+                        border: UnderlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.emailAddress,
+                      textInputAction: TextInputAction.next,
+                      validator: _emailValidator,
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Password
+                    TextFormField(
+                      controller: _pwCtrl,
+                      obscureText: _hidePw,
+                      decoration: InputDecoration(
+                        labelText: 'Password',
+                        border: const UnderlineInputBorder(),
+                        suffixIcon: IconButton(
+                          icon: Icon(
+                            _hidePw ? Icons.visibility_off : Icons.visibility,
+                          ),
+                          onPressed: () =>
+                              setState(() => _hidePw = !_hidePw),
+                        ),
+                      ),
+                      textInputAction: TextInputAction.next,
+                      validator: (v) =>
+                          (v == null || v.length < 6)
+                              ? 'At least 6 characters'
+                              : null,
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Confirm password
+                    TextFormField(
+                      controller: _pw2Ctrl,
+                      obscureText: _hidePw2,
+                      decoration: InputDecoration(
+                        labelText: 'Confirm password',
+                        border: const UnderlineInputBorder(),
+                        suffixIcon: IconButton(
+                          icon: Icon(
+                            _hidePw2
+                                ? Icons.visibility_off
+                                : Icons.visibility,
+                          ),
+                          onPressed: () =>
+                              setState(() => _hidePw2 = !_hidePw2),
+                        ),
+                      ),
+                      validator: _required,
+                    ),
+                    const SizedBox(height: 28),
+
+                    // Sign Up button
+                    SizedBox(
+                      width: double.infinity,
+                      height: 54,
+                      child: ElevatedButton(
+                        onPressed: _isLoading ? null : _signUp,
+                        style: ElevatedButton.styleFrom(
+                          shape: const StadiumBorder(),
+                          elevation: 0,
+                          backgroundColor: Colors.white.withOpacity(0.7),
+                          foregroundColor: const Color(0xFF5A4FBF),
+                          textStyle: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        child: _isLoading
+                            ? const SizedBox(
+                                width: 22,
+                                height: 22,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Text('Sign up'),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Log In link
+                    TextButton(
+                      onPressed:
+                          _isLoading ? null : () => Navigator.of(context).pop(),
+                      child: const Text(
+                        'Already have an account? Log in',
+                        style: TextStyle(
+                          color: Color(0xFF5A4FBF),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 8),
+                  ],
                 ),
               ),
-              const SizedBox(height: 20),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  minimumSize: const Size(double.infinity, 50),
-                ),
-                onPressed: _isLoading ? null : _onSignUpPressed,
-                child: _isLoading
-                    ? const CircularProgressIndicator()
-                    : const Text('Sign up'),
-              ),
-              TextButton(
-                onPressed: () {
-                  Navigator.of(context).pop();
-                },
-                child: const Text('Already have an account? Log in'),
-              ),
-            ],
+            ),
           ),
         ),
       ),
     );
   }
 }
+

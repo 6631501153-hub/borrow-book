@@ -1,9 +1,15 @@
-
 // lib/student_notifications.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/main.dart';
 import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
+
+// lib/student_notifications.dart
+// import 'package:flutter/material.dart';
+// import 'package:flutter_application_1/main.dart';
+// import 'package:intl/intl.dart';
+// import 'package:supabase_flutter/supabase_flutter.dart';
 
 class StudentNotificationsPage extends StatefulWidget {
   const StudentNotificationsPage({super.key});
@@ -16,6 +22,9 @@ class StudentNotificationsPage extends StatefulWidget {
 class _StudentNotificationsPageState extends State<StudentNotificationsPage> {
   bool _isLoading = true;
   List<Map<String, dynamic>> _requests = [];
+
+  /// Tracks which request-id is being cancelled to disable its button
+  final Set<int> _busyIds = {};
 
   @override
   void initState() {
@@ -30,7 +39,7 @@ class _StudentNotificationsPageState extends State<StudentNotificationsPage> {
       if (uid == null) {
         _requests = [];
       } else {
-        // IMPORTANT: alias + inner join — same pattern as other pages
+        // Join asset columns; exclude returned & cancelled
         final resp = await supabase
             .from('borrow_history')
             .select(
@@ -38,13 +47,12 @@ class _StudentNotificationsPageState extends State<StudentNotificationsPage> {
               'asset:asset!inner(id, name, image_url)',
             )
             .eq('user_id', uid)
-            .neq('status', 'returned')
+            .not('status', 'in', ['returned', 'cancelled']) // <-- FIXED
             .order('borrow_date', ascending: false);
 
         _requests = List<Map<String, dynamic>>.from(resp);
       }
     } on PostgrestException catch (e) {
-      // Show the error but still render a demo so the screen isn't blank
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Fetch error: ${e.message}')),
@@ -59,47 +67,64 @@ class _StudentNotificationsPageState extends State<StudentNotificationsPage> {
       }
       _requests = [];
     } finally {
-      // If nothing came back, show one demo card so UI isn't empty
-      if (_requests.isEmpty) {
-        _requests = [
-          {
-            'id': -1,
-            'status': 'pending ',
-            'borrow_date': '2025-01-01T23:59:00.000Z',
-            'return_date': '2025-01-01T23:59:00.000Z',
-            'asset': {
-              'id': -1,
-              'name': 'Mobile application Development',
-              'image_url': '', // keep grey box like the mock
-            },
-          },
-        ];
-      }
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _cancelRequest(Map<String, dynamic> request) async {
-    // Ignore cancel for demo row
-    if (request['id'] == -1) return;
+    final int id = (request['id'] as num).toInt();
+    if (_busyIds.contains(id)) return;
 
-    final requestId = request['id'];
-    final assetId = request['asset']['id'];
+    final assetId = request['asset']?['id'];
+    if (assetId == null) return;
+
+    // Optimistic UI: remove immediately, but keep a copy to restore on failure
+    final prevList = List<Map<String, dynamic>>.from(_requests);
+    setState(() {
+      _busyIds.add(id);
+      _requests.removeWhere((r) => (r['id'] as num).toInt() == id);
+    });
+
     try {
-      await supabase.from('borrow_history').delete().eq('id', requestId);
+      // 1) Mark the borrow as cancelled (soft delete)
+      await supabase
+          .from('borrow_history')
+          .update({'status': 'cancelled'})
+          .eq('id', id);
+
+      // 2) Flip the asset back to available
       await supabase.from('asset').update({'status': 'available'}).eq('id', assetId);
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Request cancelled.'), backgroundColor: Colors.green),
+          const SnackBar(
+            content: Text('Request cancelled.'),
+            backgroundColor: Colors.green,
+          ),
         );
       }
-      _fetchRequests();
+    } on PostgrestException catch (e) {
+      if (mounted) {
+        setState(() => _requests = prevList);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Cancel failed: ${e.message}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     } catch (e) {
       if (mounted) {
+        setState(() => _requests = prevList);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error cancelling request: $e'), backgroundColor: Colors.red),
+          SnackBar(
+            content: Text('Cancel failed: $e'),
+            backgroundColor: Colors.red,
+          ),
         );
       }
+    } finally {
+      if (mounted) setState(() => _busyIds.remove(id));
     }
   }
 
@@ -110,17 +135,28 @@ class _StudentNotificationsPageState extends State<StudentNotificationsPage> {
           ? const Center(child: CircularProgressIndicator())
           : RefreshIndicator(
               onRefresh: _fetchRequests,
-              child: ListView.builder(
-                padding: const EdgeInsets.only(bottom: 24),
-                itemCount: _requests.length,
-                itemBuilder: (context, index) {
-                  final r = _requests[index];
-                  return _RequestCardAndActions(
-                    request: r,
-                    onCancel: () => _cancelRequest(r),
-                  );
-                },
-              ),
+              child: _requests.isEmpty
+                  ? ListView(
+                      children: const [
+                        SizedBox(height: 120),
+                        Center(child: Text('No active requests')),
+                        SizedBox(height: 120),
+                      ],
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.only(bottom: 24),
+                      itemCount: _requests.length,
+                      itemBuilder: (context, index) {
+                        final r = _requests[index];
+                        final isBusy =
+                            _busyIds.contains((r['id'] as num).toInt());
+                        return _RequestCardAndActions(
+                          request: r,
+                          busy: isBusy,
+                          onCancel: () => _cancelRequest(r),
+                        );
+                      },
+                    ),
             ),
     );
   }
@@ -130,9 +166,11 @@ class _StudentNotificationsPageState extends State<StudentNotificationsPage> {
 class _RequestCardAndActions extends StatelessWidget {
   final Map<String, dynamic> request;
   final VoidCallback onCancel;
+  final bool busy;
   const _RequestCardAndActions({
     required this.request,
     required this.onCancel,
+    required this.busy,
   });
 
   String _fmtTime(String iso) =>
@@ -169,7 +207,7 @@ class _RequestCardAndActions extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Image (grey box if no URL)
+                // Image
                 Container(
                   height: 220,
                   decoration: BoxDecoration(
@@ -233,7 +271,8 @@ class _RequestCardAndActions extends StatelessWidget {
                         color: Colors.white,
                         border: Border.all(color: yellow, width: 3),
                       ),
-                      child: const Icon(Icons.more_horiz, color: yellow, size: 20),
+                      child: const Icon(Icons.more_horiz,
+                          color: yellow, size: 20),
                     ),
                     const SizedBox(height: 10),
                     Text(
@@ -257,7 +296,7 @@ class _RequestCardAndActions extends StatelessWidget {
               width: double.infinity,
               height: 44,
               child: ElevatedButton(
-                onPressed: onCancel,
+                onPressed: busy ? null : onCancel,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: const Color(0xFFE53935),
                   shape: RoundedRectangleBorder(
@@ -265,9 +304,20 @@ class _RequestCardAndActions extends StatelessWidget {
                   ),
                   elevation: 0,
                 ),
-                child: const Text('cancel',
-                    style:
-                        TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                child: busy
+                    ? const SizedBox(
+                        height: 18,
+                        width: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Text(
+                        'cancel',
+                        style: TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.w600),
+                      ),
               ),
             ),
         ],

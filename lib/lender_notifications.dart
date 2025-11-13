@@ -1,4 +1,3 @@
-
 // lib/lender_notifications.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/main.dart'; // Supabase client
@@ -15,14 +14,16 @@ class LenderNotificationsPage extends StatefulWidget {
 
 class _LenderNotificationsPageState extends State<LenderNotificationsPage> {
   bool _isLoading = true;
+  String? _error;
+
   List<Map<String, dynamic>> _requests = [];
   String _lenderName = 'lender name';
 
   @override
   void initState() {
     super.initState();
-    _fetchPendingRequests();
     _fetchLenderName();
+    _fetchPendingRequests();
   }
 
   // -------------------- Data --------------------
@@ -31,69 +32,215 @@ class _LenderNotificationsPageState extends State<LenderNotificationsPage> {
     try {
       final uid = supabase.auth.currentUser?.id;
       if (uid == null) return;
+
       final row = await supabase
           .from('users')
-          .select('full_name')
+          .select('name')
           .eq('id', uid)
           .maybeSingle();
-      final name = (row?['full_name'] as String?)?.trim();
-      if (name != null && name.isNotEmpty) setState(() => _lenderName = name);
-    } catch (_) {}
+
+      final name = (row?['name'] as String?)?.trim();
+      if (name != null && name.isNotEmpty) {
+        setState(() => _lenderName = name);
+      }
+    } catch (_) {
+      // keep default
+    }
   }
 
+  /// Fetch pending borrow requests + asset info,
+  /// then in a second query fetch all student names.
   Future<void> _fetchPendingRequests() async {
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _error = null;
+    });
+
     try {
+      // 1) pending requests with asset join (this was working)
       final resp = await supabase
           .from('borrow_history')
           .select(
-              'id, asset_id, status, borrow_date, return_due_date, asset:asset!inner(name)')
+            'id, asset_id, user_id, status, borrow_date, return_date, '
+            'asset:asset!inner(name, serial_number)',
+          )
           .eq('status', 'pending')
           .order('borrow_date', ascending: true);
-      setState(() => _requests = List<Map<String, dynamic>>.from(resp));
-    } catch (_) {} finally {
+
+      final list =
+          List<Map<String, dynamic>>.from(resp as List<dynamic>);
+
+      // 2) collect unique user_ids
+      final uids = list
+          .map((r) => r['user_id'])
+          .where((id) => id != null)
+          .cast<String>()
+          .toSet()
+          .toList();
+
+      Map<String, String> nameMap = {};
+      if (uids.isNotEmpty) {
+        // 3) fetch names in one go (no FK join needed)
+        final userRows = await supabase
+            .from('users')
+            .select('id, name')
+            .inFilter('id', uids);
+
+        nameMap = {
+          for (final row in userRows as List<dynamic>)
+            (row['id'] as String): (row['name'] ?? '').toString(),
+        };
+      }
+
+      // 4) attach student_name field to each request
+      for (final r in list) {
+        final uid = r['user_id'] as String?;
+        r['student_name'] =
+            uid == null || (nameMap[uid] ?? '').isEmpty
+                ? 'Unknown'
+                : nameMap[uid];
+      }
+
+      setState(() {
+        _requests = list;
+      });
+    } on PostgrestException catch (e) {
+      setState(() => _error = e.message);
+    } catch (e) {
+      setState(() => _error = e.toString());
+    } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
+  // ---------- APPROVE / REJECT (direct updates) ----------
+
   Future<void> _approve(Map<String, dynamic> row) async {
+    final currentUserId = supabase.auth.currentUser?.id;
+    if (currentUserId == null) {
+      _showSnack('Not logged in.');
+      return;
+    }
+
+    final assetId = row['asset_id'];
+    if (assetId == null) {
+      _showSnack('Missing asset id.');
+      return;
+    }
+
     try {
-      await supabase
-          .from('borrow_history')
-          .update({
-            'status': 'borrowed',
-            'lender_id': supabase.auth.currentUser?.id,
-          })
-          .eq('id', row['id']);
+      // 1) update borrow_history
+      await supabase.from('borrow_history').update({
+        'status': 'approved',
+        'lender_id': currentUserId,
+        'approved_at': DateTime.now().toIso8601String(),
+        'rejected_reason': null,
+      }).eq('id', row['id']);
+
+      // 2) mark asset as borrowed
       await supabase
           .from('asset')
-          .update({'status': 'borrowed'}).eq('id', row['asset_id']);
-      _fetchPendingRequests();
-    } catch (_) {}
+          .update({'status': 'borrowed'}).eq('id', assetId);
+
+      await _fetchPendingRequests();
+      _showSnack('Request approved.');
+    } on PostgrestException catch (e) {
+      _showSnack('Failed to approve: ${e.message}');
+    } catch (e) {
+      _showSnack('Failed to approve: $e');
+    }
   }
 
   Future<void> _reject(Map<String, dynamic> row) async {
+    final currentUserId = supabase.auth.currentUser?.id;
+    if (currentUserId == null) {
+      _showSnack('Not logged in.');
+      return;
+    }
+
+    final assetId = row['asset_id'];
+    if (assetId == null) {
+      _showSnack('Missing asset id.');
+      return;
+    }
+
+    // Ask for reason first
+    final reason = await _askRejectReason();
+    if (reason == null || reason.trim().isEmpty) {
+      // cancelled or empty → do nothing
+      return;
+    }
+    final cleanedReason = reason.trim();
+
     try {
-      await supabase
-          .from('borrow_history')
-          .update({
-            'status': 'rejected',
-            'lender_id': supabase.auth.currentUser?.id,
-          })
-          .eq('id', row['id']);
+      // 1) update borrow_history with status + reason
+      await supabase.from('borrow_history').update({
+        'status': 'rejected',
+        'lender_id': currentUserId,
+        'approved_at': null,
+        'returned_at': null,
+        'rejected_reason': cleanedReason,
+      }).eq('id', row['id']);
+
+      // 2) free up asset again
       await supabase
           .from('asset')
-          .update({'status': 'available'}).eq('id', row['asset_id']);
-      _fetchPendingRequests();
-    } catch (_) {}
+          .update({'status': 'available'}).eq('id', assetId);
+
+      await _fetchPendingRequests();
+      _showSnack('Request rejected.');
+    } on PostgrestException catch (e) {
+      _showSnack('Failed to reject: ${e.message}');
+    } catch (e) {
+      _showSnack('Failed to reject: $e');
+    }
+  }
+
+  Future<String?> _askRejectReason() async {
+    final controller = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reject request'),
+        content: TextField(
+          controller: controller,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            labelText: 'Reason',
+            hintText: 'e.g. Not available this week',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.of(ctx).pop(controller.text.trim()),
+            child: const Text(
+              'Reject',
+              style: TextStyle(color: Colors.red),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showSnack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg)),
+    );
   }
 
   String _fmtDate(dynamic v) {
-    if (v == null) return '10/01/2025';
+    if (v == null) return '-';
     try {
-      return DateFormat('dd/MM/yyyy').format(DateTime.parse(v));
+      return DateFormat('dd/MM/yyyy').format(DateTime.parse(v.toString()));
     } catch (_) {
-      return '10/01/2025';
+      return '-';
     }
   }
 
@@ -119,7 +266,7 @@ class _LenderNotificationsPageState extends State<LenderNotificationsPage> {
                   const Text(
                     'Pending',
                     style: TextStyle(
-                      fontSize: 44, // smaller title
+                      fontSize: 44,
                       fontWeight: FontWeight.w700,
                       height: 1.0,
                     ),
@@ -136,7 +283,7 @@ class _LenderNotificationsPageState extends State<LenderNotificationsPage> {
               ),
             ),
 
-            // Search + Filter Row
+            // Search + Filter Row (UI only)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
               child: Row(
@@ -151,7 +298,8 @@ class _LenderNotificationsPageState extends State<LenderNotificationsPage> {
                       padding: const EdgeInsets.symmetric(horizontal: 10),
                       child: const Align(
                         alignment: Alignment.centerRight,
-                        child: Icon(Icons.search, size: 18, color: Colors.black54),
+                        child: Icon(Icons.search,
+                            size: 18, color: Colors.black54),
                       ),
                     ),
                   ),
@@ -163,7 +311,8 @@ class _LenderNotificationsPageState extends State<LenderNotificationsPage> {
                       border: Border.all(color: Colors.black87, width: 1),
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: const Icon(Icons.filter_list, size: 18, color: Colors.black87),
+                    child: const Icon(Icons.filter_list,
+                        size: 18, color: Colors.black87),
                   ),
                 ],
               ),
@@ -173,7 +322,8 @@ class _LenderNotificationsPageState extends State<LenderNotificationsPage> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                 decoration: BoxDecoration(
                   color: headerGrey,
                   borderRadius: BorderRadius.circular(10),
@@ -197,66 +347,81 @@ class _LenderNotificationsPageState extends State<LenderNotificationsPage> {
             Expanded(
               child: _isLoading
                   ? const Center(child: CircularProgressIndicator())
-                  : RefreshIndicator(
-                      onRefresh: _fetchPendingRequests,
-                      child: ListView.separated(
-                        padding: const EdgeInsets.fromLTRB(12, 2, 12, 10),
-                        itemCount: _requests.isEmpty ? 3 : _requests.length,
-                        separatorBuilder: (_, __) => const Divider(
-                          height: 20,
-                          thickness: 0.8,
-                          color: Colors.black87,
-                        ),
-                        itemBuilder: (context, i) {
-                          final r = (_requests.isEmpty)
-                              ? {
-                                  'asset': {'name': 'mobile application Deverlopment'},
-                                  'asset_id': 'xxxxx',
-                                  'borrow_date': null,
-                                  'return_due_date': null,
-                                }
-                              : _requests[i];
+                  : _error != null
+                      ? Center(child: Text('Error: $_error'))
+                      : _requests.isEmpty
+                          ? const Center(
+                              child: Text(
+                                'No pending requests.',
+                                style: TextStyle(color: Colors.black54),
+                              ),
+                            )
+                          : RefreshIndicator(
+                              onRefresh: _fetchPendingRequests,
+                              child: ListView.separated(
+                                padding:
+                                    const EdgeInsets.fromLTRB(12, 2, 12, 10),
+                                itemCount: _requests.length,
+                                separatorBuilder: (_, __) => const Divider(
+                                  height: 20,
+                                  thickness: 0.8,
+                                  color: Colors.black87,
+                                ),
+                                itemBuilder: (context, i) {
+                                  final r = _requests[i];
 
-                          final book = (r['asset']?['name'] ?? '').toString();
-                          final idText = (r['asset_id'] ?? 'xxxxx').toString();
-                          final borrow = _fmtDate(r['borrow_date']);
-                          final due = _fmtDate(r['return_due_date']);
+                                  final book =
+                                      (r['asset']?['name'] ?? '').toString();
+                                  final idText =
+                                      (r['asset']?['serial_number'] ??
+                                              r['asset_id'] ??
+                                              'xxxxx')
+                                          .toString();
+                                  final borrow = _fmtDate(r['borrow_date']);
+                                  final due = _fmtDate(r['return_date']);
+                                  final studentName =
+                                      (r['student_name'] ?? 'Unknown')
+                                          .toString();
 
-                          return Row(
-                            crossAxisAlignment: CrossAxisAlignment.center,
-                            children: [
-                              _Cell(text: book, flex: 3, maxLines: 2),
-                              _Cell(text: idText, flex: 1),
-                              _Cell(text: borrow, flex: 2),
-                              _Cell(text: due, flex: 2),
-                              const _Cell(text: 'student', flex: 2),
-                              Expanded(
-                                flex: 2,
-                                child: Align(
-                                  alignment: Alignment.centerRight,
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.end,
+                                  return Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.center,
                                     children: [
-                                      _Pill(
-                                        label: 'approve',
-                                        color: pillGreen,
-                                        onTap: () => _approve(r),
-                                      ),
-                                      const SizedBox(height: 6),
-                                      _Pill(
-                                        label: 'reject',
-                                        color: pillRed,
-                                        onTap: () => _reject(r),
+                                      _Cell(text: book, flex: 3, maxLines: 2),
+                                      _Cell(text: idText, flex: 1),
+                                      _Cell(text: borrow, flex: 2),
+                                      _Cell(text: due, flex: 2),
+                                      _Cell(
+                                          text: studentName,
+                                          flex: 2), // real student name
+                                      Expanded(
+                                        flex: 2,
+                                        child: Align(
+                                          alignment: Alignment.centerRight,
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.end,
+                                            children: [
+                                              _Pill(
+                                                label: 'approve',
+                                                color: pillGreen,
+                                                onTap: () => _approve(r),
+                                              ),
+                                              const SizedBox(height: 6),
+                                              _Pill(
+                                                label: 'reject',
+                                                color: pillRed,
+                                                onTap: () => _reject(r),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
                                       ),
                                     ],
-                                  ),
-                                ),
+                                  );
+                                },
                               ),
-                            ],
-                          );
-                        },
-                      ),
-                    ),
+                            ),
             ),
           ],
         ),
@@ -265,7 +430,8 @@ class _LenderNotificationsPageState extends State<LenderNotificationsPage> {
   }
 }
 
-// ====== Shrunk versions of components ======
+// ====== Cells & buttons ======
+
 class _Cell extends StatelessWidget {
   final String text;
   final int flex;
@@ -280,7 +446,11 @@ class _Cell extends StatelessWidget {
         padding: const EdgeInsets.only(right: 6),
         child: Text(
           text,
-          style: const TextStyle(fontSize: 13, height: 1.15, color: Colors.black87),
+          style: const TextStyle(
+            fontSize: 13,
+            height: 1.15,
+            color: Colors.black87,
+          ),
           softWrap: true,
           maxLines: maxLines,
           overflow: TextOverflow.visible,

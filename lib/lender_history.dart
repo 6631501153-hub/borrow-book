@@ -1,33 +1,33 @@
-// lib/student_history.dart
 import 'package:flutter/material.dart';
-import 'package:flutter_application_1/main.dart'; // For supabase
-import 'package:intl/intl.dart'; // For date formatting
+import 'package:flutter_application_1/main.dart';
+import 'package:intl/intl.dart';
 
 class LenderHistoryPage extends StatefulWidget {
   const LenderHistoryPage({super.key});
-
   @override
   State<LenderHistoryPage> createState() => _LenderHistoryPageState();
 }
 
 class _LenderHistoryPageState extends State<LenderHistoryPage> {
   bool _isLoading = true;
+
   List<Map<String, dynamic>> _allHistory = [];
   List<Map<String, dynamic>> _filteredHistory = [];
 
-  // Stats
   int _totalBorrowed = 0;
   int _currentlyBorrowing = 0;
 
-  // Filters
   final _searchController = TextEditingController();
-  String _selectedStatus = 'All'; // 'All', 'borrowed', 'returned'
+  String _selectedStatus = 'All'; // All | borrowed | returned
+
+  String _lenderName = 'lender name';
 
   @override
   void initState() {
     super.initState();
-    _loadInitialData();
-    _searchController.addListener(_runFilters);
+    _fetchLenderName();
+    _load();
+    _searchController.addListener(_applyFilters);
   }
 
   @override
@@ -36,366 +36,517 @@ class _LenderHistoryPageState extends State<LenderHistoryPage> {
     super.dispose();
   }
 
-  Future<void> _loadInitialData() async {
-    setState(() {
-      _isLoading = true;
-    });
+  // ---------- Lender name ----------
 
+  Future<void> _fetchLenderName() async {
     try {
-      await _fetchHistory();
-      _calculateStats();
-      _runFilters();
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error loading history: $error'),
-            backgroundColor: Colors.red,
-          ),
-        );
+      final uid = supabase.auth.currentUser?.id;
+      if (uid == null) return;
+
+      final row = await supabase
+          .from('users')
+          .select('name')
+          .eq('id', uid)
+          .maybeSingle();
+
+      final name = (row?['name'] as String?)?.trim();
+      if (name != null && name.isNotEmpty) {
+        setState(() => _lenderName = name);
       }
+    } catch (_) {}
+  }
+
+  // ---------- Load history (with student names) ----------
+
+  Future<void> _load() async {
+    setState(() => _isLoading = true);
+    try {
+      final user = supabase.auth.currentUser;
+      if (user == null) {
+        _allHistory = [];
+        _filteredHistory = [];
+        _totalBorrowed = 0;
+        _currentlyBorrowing = 0;
+        return;
+      }
+
+      // 1) base history rows for this lender
+      final resp = await supabase
+          .from('borrow_history')
+          .select(
+            'id, user_id, lender_id, asset_id, status, '
+            'borrow_date, return_date, '
+            'asset:asset!inner(name)',
+          )
+          // if you want ALL rows you can see, comment this line out
+          .eq('lender_id', user.id)
+          .order('borrow_date', ascending: false);
+
+      final rawRows = List<Map<String, dynamic>>.from(resp);
+
+      // 2) collect distinct student user_ids
+      final userIds = <String>{
+        for (final r in rawRows)
+          if (r['user_id'] != null) r['user_id'].toString(),
+      };
+
+      // 3) lookup names from users table
+      final Map<String, String> userNameById = {};
+      if (userIds.isNotEmpty) {
+        try {
+          final ures = await supabase
+              .from('users')
+              .select('id, name')
+              .inFilter('id', userIds.toList());
+
+          for (final u in (ures as List)) {
+            final id = u['id']?.toString();
+            final nm = (u['name'] ?? '').toString().trim();
+            if (id != null && id.isNotEmpty) {
+              userNameById[id] = nm.isEmpty ? 'N/A' : nm;
+            }
+          }
+        } catch (_) {
+          // if blocked by RLS, names will stay as 'N/A'
+        }
+      }
+
+      // 4) stitch: add a "student_name" field per row
+      _allHistory = rawRows
+          .map((r) => {
+                ...r,
+                'student_name':
+                    userNameById[r['user_id']?.toString()] ?? 'N/A',
+              })
+          .toList();
+
+      _calc();
+      _applyFilters();
+    } catch (_) {
+      // on error keep whatever we had; could also clear
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  /// Fetches 'borrowed' and 'returned' items from the database
-  Future<void> _fetchHistory() async {
-    final userId = supabase.auth.currentUser!.id;
-
-    // --- THIS IS THE ONLY CHANGE ---
-    // We now select 'lender_id' and alias it as 'approver'
-    // so the rest of the code doesn't need to change.
-    final response = await supabase
-        .from('borrow_history')
-        .select(
-          '*, asset(*), approver:lender_id!users(full_name), returner:staff_id!users(full_name)',
-        )
-        .eq('user_id', userId)
-        .inFilter('status', ['borrowed', 'returned'])
-        .order('borrow_date', ascending: false);
-    // --- END OF CHANGE ---
-
-    _allHistory = List<Map<String, dynamic>>.from(response);
+  // Map raw DB status → UI status
+  // approved  -> borrowed
+  // returned  -> returned
+  // others    -> '' (ignored in history)
+  String _toUiStatus(dynamic raw) {
+    final s = (raw ?? '').toString().toLowerCase();
+    if (s == 'approved') return 'borrowed';
+    if (s == 'returned') return 'returned';
+    return ''; // rejected, pending, etc → not shown
   }
 
-  void _calculateStats() {
-    _totalBorrowed = _allHistory.length;
-    _currentlyBorrowing = _allHistory
-        .where((h) => h['status'] == 'borrowed')
-        .length;
+  void _calc() {
+    final valid = _allHistory
+        .where((h) {
+          final ui = _toUiStatus(h['status']);
+          return ui == 'borrowed' || ui == 'returned';
+        })
+        .toList();
+
+    _totalBorrowed = valid.length;
+    _currentlyBorrowing =
+        valid.where((h) => _toUiStatus(h['status']) == 'borrowed').length;
   }
 
-  void _runFilters() {
-    List<Map<String, dynamic>> results = _allHistory;
-    final searchQuery = _searchController.text.toLowerCase();
+  void _applyFilters() {
+    final q = _searchController.text.toLowerCase();
+
+    var list = _allHistory.where((h) {
+      final uiStatus = _toUiStatus(h['status']);
+      return uiStatus == 'borrowed' || uiStatus == 'returned';
+    }).toList();
 
     if (_selectedStatus != 'All') {
-      results = results.where((h) {
-        return h['status'] == _selectedStatus;
-      }).toList();
+      list = list
+          .where((h) => _toUiStatus(h['status']) == _selectedStatus)
+          .toList();
     }
 
-    if (searchQuery.isNotEmpty) {
-      results = results.where((h) {
-        final assetName = h['asset']['name']?.toString().toLowerCase() ?? '';
-        return assetName.contains(searchQuery);
-      }).toList();
+    if (q.isNotEmpty) {
+      list = list
+          .where((h) =>
+              (h['asset']?['name'] ?? '')
+                  .toString()
+                  .toLowerCase()
+                  .contains(q))
+          .toList();
     }
 
-    setState(() {
-      _filteredHistory = results;
-    });
+    setState(() => _filteredHistory = list);
   }
 
-  // --- All the build methods below are unchanged ---
+  String _fmtDateTwoLines(dynamic v) {
+    if (v == null) return 'N/A';
+    try {
+      final d = DateTime.parse(v.toString());
+      return '${DateFormat('dd/MM/').format(d)}\n${DateFormat('yyyy').format(d)}';
+    } catch (_) {
+      return 'N/A';
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16.0),
-        child: Column(
-          children: [
-            _buildHeader(),
-            const SizedBox(height: 16),
-            _buildStats(),
-            const SizedBox(height: 16),
-            _buildSearchBar(),
-            const SizedBox(height: 16),
-            _buildFilterToggles(),
-            const SizedBox(height: 16),
-            _buildListHeader(),
-            _buildHistoryList(),
-          ],
+    const headerGrey = Color(0xFFD9D9D9);
+    const chipBlue = Color(0xFF3085F4);
+    const statusGreen = Color(0xFF69C76E);
+
+    return Scaffold(
+      backgroundColor: Colors.white,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Title + lender name
+              Padding(
+                padding: const EdgeInsets.only(top: 10.0, bottom: 4),
+                child: Row(
+                  children: [
+                    const Text(
+                      'History',
+                      style: TextStyle(
+                        fontSize: 42,
+                        fontWeight: FontWeight.w700,
+                        height: 1,
+                      ),
+                    ),
+                    const Spacer(),
+                    Text(
+                      _lenderName,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        color: Colors.black87,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // Stats card
+              Container(
+                margin: const EdgeInsets.only(top: 2, bottom: 8),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE6E6E6),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(
+                  children: [
+                    _statLine('total book borrowing:', _totalBorrowed),
+                    const SizedBox(height: 4),
+                    _statLine('currently borrowing:', _currentlyBorrowing),
+                  ],
+                ),
+              ),
+
+              // Search + Filter
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _searchController,
+                      style: const TextStyle(fontSize: 13),
+                      decoration: InputDecoration(
+                        contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 8),
+                        filled: true,
+                        fillColor: const Color(0xFFE6E6E6),
+                        suffixIcon: const Icon(Icons.search,
+                            size: 18, color: Colors.black54),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
+                          borderSide: BorderSide.none,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  _FilterChip(
+                    label: 'All',
+                    selected: _selectedStatus == 'All',
+                    filledColor: chipBlue,
+                    onTap: () {
+                      setState(() => _selectedStatus = 'All');
+                      _applyFilters();
+                    },
+                  ),
+                  const SizedBox(width: 8),
+                  _FilterChip(
+                    label: 'borrowed',
+                    selected: _selectedStatus == 'borrowed',
+                    onTap: () {
+                      setState(() => _selectedStatus = 'borrowed');
+                      _applyFilters();
+                    },
+                  ),
+                  const SizedBox(width: 8),
+                  _FilterChip(
+                    label: 'returned',
+                    selected: _selectedStatus == 'returned',
+                    onTap: () {
+                      setState(() => _selectedStatus = 'returned');
+                      _applyFilters();
+                    },
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 8),
+
+              // Table header
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: headerGrey,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Row(
+                  children: [
+                    _HeaderCell('book name', flex: 3),
+                    _HeaderCell('Date', flex: 2),
+                    _HeaderCell('student\nname', flex: 2),
+                    _HeaderCell('Returned\nTo', flex: 2),
+                    _HeaderCell('status', flex: 2, alignEnd: true),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 4),
+
+              // List
+              if (_isLoading)
+                const Expanded(
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else
+                Expanded(
+                  child: RefreshIndicator(
+                    onRefresh: _load,
+                    child: ListView.separated(
+                      padding: const EdgeInsets.fromLTRB(0, 2, 0, 8),
+                      separatorBuilder: (_, __) => const Divider(
+                        height: 20,
+                        thickness: 1,
+                        color: Colors.black87,
+                      ),
+                      itemCount: _filteredHistory.length,
+                      itemBuilder: (context, i) {
+                        final h = _filteredHistory[i];
+
+                        final book =
+                            (h['asset']?['name'] ?? 'unknown').toString();
+                        final date2 = _fmtDateTwoLines(h['borrow_date']);
+                        final student =
+                            (h['student_name'] ?? 'N/A').toString();
+
+                        final uiStatus = _toUiStatus(h['status']);
+                        final returnedTo =
+                            (uiStatus == 'returned') ? 'staff' : 'N/A';
+
+                        return Padding(
+                          padding:
+                              const EdgeInsets.symmetric(horizontal: 2.0),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              Expanded(
+                                flex: 3,
+                                child: Text(
+                                  book,
+                                  style: const TextStyle(
+                                      fontSize: 14,
+                                      color: Colors.black87),
+                                  softWrap: true,
+                                  maxLines: 2,
+                                ),
+                              ),
+                              Expanded(
+                                flex: 2,
+                                child: Text(
+                                  date2,
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    height: 1.1,
+                                  ),
+                                ),
+                              ),
+                              Expanded(
+                                flex: 2,
+                                child: Text(
+                                  student,
+                                  style: const TextStyle(fontSize: 14),
+                                ),
+                              ),
+                              Expanded(
+                                flex: 2,
+                                child: Text(
+                                  returnedTo,
+                                  style:
+                                      const TextStyle(fontSize: 14),
+                                ),
+                              ),
+                              Expanded(
+                                flex: 2,
+                                child: Align(
+                                  alignment: Alignment.centerRight,
+                                  child: _SolidStatusPill(
+                                    status: uiStatus,
+                                    blue: chipBlue,
+                                    green: statusGreen,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildHeader() {
-    return Padding(
-      padding: const EdgeInsets.only(top: 16.0),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: const [
-          Text(
-            'History',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-          ),
-          // TODO: Get student name dynamically
-          Text(
-            'Lender name',
-            style: TextStyle(fontSize: 16, color: Colors.grey),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildStats() {
+  Widget _statLine(String label, int value) {
     return Row(
       children: [
         Expanded(
-          child: _buildStatCard('total book borrowing:', _totalBorrowed),
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontSize: 13,
+              color: Colors.black87,
+            ),
+          ),
         ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: _buildStatCard('currently borrowing:', _currentlyBorrowing),
+        Container(
+          padding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Text(
+            '$value',
+            style: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
         ),
       ],
     );
   }
+}
 
-  Widget _buildStatCard(String title, int count) {
-    return Container(
-      padding: const EdgeInsets.all(12.0),
-      decoration: BoxDecoration(
-        color: Colors.grey[200],
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            count.toString(),
-            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-          ),
-          Text(
-            title,
-            style: const TextStyle(
-              fontSize: 12,
-              color: Color.fromARGB(255, 97, 97, 97),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+// --- Small UI helpers ---
 
-  Widget _buildSearchBar() {
-    return TextField(
-      controller: _searchController,
-      decoration: InputDecoration(
-        hintText: 'Search...',
-        prefixIcon: const Icon(Icons.search),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8.0),
-          borderSide: BorderSide.none,
-        ),
-        filled: true,
-        fillColor: Colors.grey[200],
-      ),
-    );
-  }
+class _HeaderCell extends StatelessWidget {
+  final String text;
+  final int flex;
+  final bool alignEnd;
+  const _HeaderCell(this.text, {this.flex = 1, this.alignEnd = false});
 
-  Widget _buildFilterToggles() {
-    final filters = ['All', 'borrowed', 'returned'];
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.start,
-      children: filters.map((status) {
-        final isSelected = _selectedStatus == status;
-        return Padding(
-          padding: const EdgeInsets.only(right: 8.0),
-          child: ChoiceChip(
-            label: Text(status),
-            selected: isSelected,
-            onSelected: (selected) {
-              setState(() {
-                _selectedStatus = status;
-              });
-              _runFilters();
-            },
-            selectedColor: Colors.blue,
-            labelStyle: TextStyle(
-              color: isSelected ? Colors.white : Colors.black,
-            ),
-          ),
-        );
-      }).toList(),
-    );
-  }
-
-  Widget _buildListHeader() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8.0),
-      child: Row(
-        children: const [
-          Expanded(
-            flex: 3,
-            child: Text(
-              'book name',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-          ),
-          Expanded(
-            flex: 2,
-            child: Text('Date', style: TextStyle(fontWeight: FontWeight.bold)),
-          ),
-          Expanded(
-            flex: 2,
-            child: Text(
-              'Borrower',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-          ),
-          Expanded(
-            flex: 2,
-            child: Text(
-              'Returned To',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-          ),
-          Expanded(
-            flex: 2,
-            child: Text(
-              'status',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildHistoryList() {
-    if (_isLoading) {
-      return const Expanded(child: Center(child: CircularProgressIndicator()));
-    }
-
-    if (_filteredHistory.isEmpty) {
-      return const Expanded(child: Center(child: Text('No history found.')));
-    }
-
+  @override
+  Widget build(BuildContext context) {
     return Expanded(
-      child: RefreshIndicator(
-        onRefresh: _loadInitialData,
-        child: ListView.builder(
-          itemCount: _filteredHistory.length,
-          itemBuilder: (context, index) {
-            final item = _filteredHistory[index];
-            return _HistoryItemRow(historyItem: item);
-          },
+      flex: flex,
+      child: Align(
+        alignment: alignEnd ? Alignment.centerRight : Alignment.centerLeft,
+        child: Text(
+          text,
+          softWrap: true,
+          maxLines: 2,
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+            color: Colors.black87,
+            height: 1.05,
+          ),
         ),
       ),
     );
   }
 }
 
-// --- Custom Row Widget (No changes needed here) ---
-// This widget still works because our query renames 'lender_id'
-// to 'approver' before it gets to the app.
-class _HistoryItemRow extends StatelessWidget {
-  final Map<String, dynamic> historyItem;
-
-  const _HistoryItemRow({required this.historyItem});
+class _FilterChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final Color? filledColor;
+  const _FilterChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.filledColor,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final asset = historyItem['asset'];
-    final status = historyItem['status'];
-    final bookName = asset['name'] ?? 'No Name';
-
-    final date = DateFormat(
-      'dd/MM/yyyy',
-    ).format(DateTime.parse(historyItem['borrow_date']));
-
-    final approverData = historyItem['approver'] as Map?; // This still works
-    final returnerData = historyItem['returner'] as Map?;
-
-    final approverName = approverData?['full_name'] ?? 'N/A';
-    final returnerName = status == 'returned'
-        ? (returnerData?['full_name'] ?? 'N/A')
-        : '';
-
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 12.0),
-      decoration: const BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: Color.fromARGB(255, 101, 97, 97)),
+    final filled = selected && filledColor != null;
+    return InkWell(
+      borderRadius: BorderRadius.circular(8),
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: filled ? filledColor : Colors.white,
+          borderRadius: BorderRadius.circular(8),
+          border: filled ? null : Border.all(color: Colors.black87, width: 1),
         ),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            flex: 3,
-            child: Text(bookName, overflow: TextOverflow.ellipsis),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            color: filled ? Colors.white : Colors.black,
+            fontWeight: FontWeight.w600,
           ),
-          Expanded(flex: 2, child: Text(date)),
-          Expanded(
-            flex: 2,
-            child: Text(approverName, overflow: TextOverflow.ellipsis),
-          ),
-          Expanded(
-            flex: 2,
-            child: Text(returnerName, overflow: TextOverflow.ellipsis),
-          ),
-          Expanded(flex: 2, child: StatusTag(status: status)),
-        ],
+        ),
       ),
     );
   }
 }
 
-// --- StatusTag Widget (Unchanged) ---
-class StatusTag extends StatelessWidget {
-  final String status;
-  const StatusTag({super.key, required this.status});
-
-  Color _getColor(String status) {
-    switch (status) {
-      case 'available':
-        return Colors.green;
-      case 'borrowed':
-        return Colors.blue;
-      case 'pending':
-        return Colors.orange;
-      case 'disable':
-        return Colors.red;
-      case 'returned':
-        return Colors.green;
-      default:
-        return Colors.grey;
-    }
-  }
+class _SolidStatusPill extends StatelessWidget {
+  final String status; // borrowed | returned
+  final Color blue;
+  final Color green;
+  const _SolidStatusPill({
+    required this.status,
+    required this.blue,
+    required this.green,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final s = status.toLowerCase();
+    final bg =
+        s == 'borrowed' ? blue : (s == 'returned' ? green : Colors.grey);
+    final label = s.isEmpty ? 'unknown' : s;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: _getColor(status).withOpacity(0.2),
-        borderRadius: BorderRadius.circular(12),
+        color: bg,
+        borderRadius: BorderRadius.circular(10),
       ),
       child: Text(
-        status,
-        textAlign: TextAlign.center,
-        style: TextStyle(
-          color: _getColor(status),
-          fontWeight: FontWeight.bold,
-          fontSize: 12,
+        label,
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.w700,
+          fontSize: 13,
         ),
       ),
     );

@@ -1,7 +1,7 @@
 // lib/lender_home.dart
 import 'package:flutter/material.dart';
-import 'package:flutter_application_1/main.dart'; // Import the global 'supabase' client
-import 'package:supabase_flutter/supabase_flutter.dart'; // Import for Supabase v2 syntax
+import 'package:flutter_application_1/main.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class LenderHomePage extends StatefulWidget {
   const LenderHomePage({super.key});
@@ -12,30 +12,26 @@ class LenderHomePage extends StatefulWidget {
 
 class _LenderHomePageState extends State<LenderHomePage> {
   bool _isLoading = true;
-  List<Map<String, dynamic>> _assets = []; // Master list from database
-  List<Map<String, dynamic>> _filteredAssets = []; // List to display on screen
+  List<Map<String, dynamic>> _assets = [];
+  List<Map<String, dynamic>> _filteredAssets = [];
 
-  // State variables for filtering and searching
   final TextEditingController _searchController = TextEditingController();
   String? _selectedCategory;
   String? _selectedStatus;
-  bool _isSortedAZ = false; // Tracks if sorting is active
+  bool _isSortedAZ = false;
 
-  // Dynamic list for categories, loaded from Supabase
   List<String> _categoryNames = [];
-  // Static list for statuses
-  final List<String> _statuses = [
-    'available',
-    'borrowed',
-    'pending',
-    'disable',
-  ];
+  final List<String> _statuses = ['available', 'borrowed', 'pending', 'disable'];
 
   @override
   void initState() {
     super.initState();
     _searchController.addListener(_runFilters);
-    _loadInitialData();
+
+    // ALWAYS refresh asset list when this page appears
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadInitialData();
+    });
   }
 
   @override
@@ -45,52 +41,129 @@ class _LenderHomePageState extends State<LenderHomePage> {
     super.dispose();
   }
 
-  /// Fetches both assets and categories from Supabase.
+  // ------------------------------------------------
+  // Data loading
+  // ------------------------------------------------
+
   Future<void> _loadInitialData() async {
+    setState(() => _isLoading = true);
     try {
-      await Future.wait([_fetchAssets(), _fetchCategories()]);
-    } catch (error) {
+      await Future.wait([
+        _fetchAssetsWithHistory(),
+        _fetchCategories(),
+      ]);
+      _runFilters();
+    } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Error loading data: $error')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error loading data: $e')),
+        );
       }
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  /// Fetches the list of assets from the 'asset' table.
-  Future<void> _fetchAssets() async {
-    final response = await supabase.from('asset').select();
-    _assets = List<Map<String, dynamic>>.from(response);
-    _filteredAssets = _assets; // Initially, show all assets
+  /// Normalize asset.status from DB
+  String _normalizeAssetStatus(String s) {
+    final v = s.trim().toLowerCase();
+    // for lender we keep 'disable' as-is (student used 'disabled')
+    return v;
   }
 
-  /// Fetches the list of categories from the 'categories' table.
+  /// Combine raw asset.status + latest borrow_history status for that asset.
+  ///
+  /// Rules (from lender's perspective):
+  ///   - latest bh: pending  -> 'pending'
+  ///   - latest bh: approved/borrowed -> 'borrowed'
+  ///   - latest bh: returned/rejected/cancelled -> 'available'
+  ///   - if asset is 'disable' -> always 'disable'
+  ///   - if no bh -> use raw asset.status
+  String _statusFromBorrowHistory(String rawAssetStatus, String? bhStatus) {
+    final base = _normalizeAssetStatus(rawAssetStatus);
+
+    // If asset is disabled, we always show disable
+    if (base == 'disable') return 'disable';
+
+    if (bhStatus == null) return base;
+
+    final s = bhStatus.trim().toLowerCase();
+    switch (s) {
+      case 'pending':
+        return 'pending';
+      case 'approved':
+      case 'borrowed':
+        return 'borrowed';
+      case 'returned':
+      case 'rejected':
+      case 'cancelled':
+        return 'available';
+      default:
+        return base;
+    }
+  }
+
+  /// Fetch assets and merge with latest borrow_history status (GLOBAL, not per user).
+  Future<void> _fetchAssetsWithHistory() async {
+    // 1) fetch all assets
+    final assetResp = await supabase.from('asset').select();
+    final assets = List<Map<String, dynamic>>.from(assetResp);
+
+    // 2) fetch all borrow_history rows ordered by time
+    final bhResp = await supabase
+        .from('borrow_history')
+        .select('asset_id, status, borrow_date')
+        .order('borrow_date', ascending: true); // older -> newer
+
+    final Map<dynamic, String> lastStatusByAssetId = {};
+    for (final row in (bhResp as List)) {
+      final m = Map<String, dynamic>.from(row as Map);
+      final aid = m['asset_id'];
+      final stat = (m['status'] ?? '').toString();
+      if (aid != null) {
+        // last row (newest) wins because of ascending order
+        lastStatusByAssetId[aid] = stat;
+      }
+    }
+
+    // 3) build merged list with UI status
+    _assets = assets.map((asset) {
+      final id = asset['id'];
+      final rawStatus = (asset['status'] ?? '').toString();
+      final latestBhStatus = lastStatusByAssetId[id];
+
+      final uiStatus = _statusFromBorrowHistory(rawStatus, latestBhStatus);
+
+      return {
+        ...asset,
+        'status': uiStatus, // override for UI
+      };
+    }).toList();
+
+    _filteredAssets = _assets;
+  }
+
   Future<void> _fetchCategories() async {
     final response = await supabase.from('categories').select('name');
-    _categoryNames = response
-        .map((category) => category['name'] as String)
-        .toList();
+    _categoryNames =
+        response.map<String>((e) => e['name'].toString()).toList();
   }
 
-  /// Toggles the A-Z sort state and re-runs the filters.
+  // ------------------------------------------------
+  // Filters / sorting
+  // ------------------------------------------------
+
   void _toggleSort() {
-    setState(() {
-      _isSortedAZ = !_isSortedAZ; // Flip the boolean
-    });
-    _runFilters(); // Re-apply filters and sorting
+    setState(() => _isSortedAZ = !_isSortedAZ);
+    _runFilters();
   }
 
-  /// Applies all active filters (search, category, status) and sorting.
   void _runFilters() {
-    List<Map<String, dynamic>> results = _assets;
+    List<Map<String, dynamic>> results = [..._assets];
+
     final searchText = _searchController.text.toLowerCase();
 
-    // 1. Filter by Search Text (Name)
+    // Search
     if (searchText.isNotEmpty) {
       results = results.where((asset) {
         final name = asset['name']?.toString().toLowerCase() ?? '';
@@ -98,151 +171,127 @@ class _LenderHomePageState extends State<LenderHomePage> {
       }).toList();
     }
 
-    // 2. Filter by Category
+    // Category
     if (_selectedCategory != null) {
       results = results.where((asset) {
         return asset['category'] == _selectedCategory;
       }).toList();
     }
 
-    // 3. Filter by Status
+    // Status (case insensitive)
     if (_selectedStatus != null) {
+      final selected = _selectedStatus!.toLowerCase();
       results = results.where((asset) {
-        return asset['status'] == _selectedStatus;
+        final st = (asset['status'] ?? '').toString().toLowerCase();
+        return st == selected;
       }).toList();
     }
 
-    // 4. Apply Sorting (after filtering)
+    // Sort A–Z
     if (_isSortedAZ) {
       results.sort((a, b) {
-        final nameA = a['name']?.toString().toLowerCase() ?? '';
-        final nameB = b['name']?.toString().toLowerCase() ?? '';
-        return nameA.compareTo(nameB); // Sorts A-Z
+        final aName = (a['name'] ?? '').toString().toLowerCase();
+        final bName = (b['name'] ?? '').toString().toLowerCase();
+        return aName.compareTo(bName);
       });
     }
 
-    // Update the UI with the final list
-    setState(() {
-      _filteredAssets = results;
-    });
+    setState(() => _filteredAssets = results);
   }
 
-  /// Displays the pop-up modal for filtering.
   void _showFilterModal() {
     showModalBottomSheet(
       context: context,
-      isScrollControlled: true, // Allows modal to adjust for the keyboard
+      isScrollControlled: true,
       builder: (context) {
-        return StatefulBuilder(
-          builder: (BuildContext context, StateSetter setModalState) {
-            return Padding(
-              padding: EdgeInsets.only(
-                bottom: MediaQuery.of(context).viewInsets.bottom,
-                left: 24,
-                right: 24,
-                top: 24,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Filter Assets',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Category Filter Dropdown (Dynamic)
-                  DropdownButtonFormField<String>(
-                    value: _selectedCategory,
-                    hint: const Text('Filter by Category'),
-                    onChanged: (value) {
-                      setModalState(() {
-                        _selectedCategory = value;
-                      });
-                    },
-                    items: _categoryNames.map((category) {
-                      return DropdownMenuItem(
-                        value: category,
-                        child: Text(category),
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Status Filter Dropdown (Static)
-                  DropdownButtonFormField<String>(
-                    value: _selectedStatus,
-                    hint: const Text('Filter by Status'),
-                    onChanged: (value) {
-                      setModalState(() {
-                        _selectedStatus = value;
-                      });
-                    },
-                    items: _statuses.map((status) {
-                      return DropdownMenuItem(
-                        value: status,
-                        child: Text(status),
-                      );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Action Buttons (Clear & Apply)
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      TextButton(
-                        onPressed: () {
-                          setModalState(() {
-                            _selectedCategory = null;
-                            _selectedStatus = null;
-                          });
-                          _runFilters();
-                          Navigator.pop(context);
-                        },
-                        child: const Text('Clear'),
-                      ),
-                      const SizedBox(width: 8),
-                      FilledButton(
-                        onPressed: () {
-                          _runFilters();
-                          Navigator.pop(context);
-                        },
-                        child: const Text('Apply'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16), // Bottom padding
-                ],
-              ),
-            );
-          },
-        );
+        return StatefulBuilder(builder: (context, setModalState) {
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(context).viewInsets.bottom,
+              left: 24,
+              right: 24,
+              top: 24,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButtonFormField<String>(
+                  value: _selectedCategory,
+                  hint: const Text('Filter by Category'),
+                  onChanged: (v) {
+                    setModalState(() => _selectedCategory = v);
+                  },
+                  items: _categoryNames
+                      .map((c) =>
+                          DropdownMenuItem(value: c, child: Text(c)))
+                      .toList(),
+                ),
+                const SizedBox(height: 16),
+                DropdownButtonFormField<String>(
+                  value: _selectedStatus,
+                  hint: const Text('Filter by Status'),
+                  onChanged: (v) {
+                    setModalState(() => _selectedStatus = v);
+                  },
+                  items: _statuses
+                      .map((s) =>
+                          DropdownMenuItem(value: s, child: Text(s)))
+                      .toList(),
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () {
+                        setModalState(() {
+                          _selectedCategory = null;
+                          _selectedStatus = null;
+                        });
+                        _runFilters();
+                        Navigator.pop(context);
+                      },
+                      child: const Text('Clear'),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton(
+                      onPressed: () {
+                        _runFilters();
+                        Navigator.pop(context);
+                      },
+                      child: const Text('Apply'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          );
+        });
       },
     );
   }
 
-  // --- Main Build Method ---
+  // ------------------------------------------------
+  // UI
+  // ------------------------------------------------
+
   @override
   Widget build(BuildContext context) {
-    // We remove the SafeArea from here because the parent
-    // 'LenderMainPage' Scaffold will handle it.
     return Column(
       children: [
-        // --- Top Bar (Search, Filter, Sort) ---
+        // Search bar + filter & sort
         Padding(
-          padding: const EdgeInsets.all(16.0),
+          padding: const EdgeInsets.all(16),
           child: Row(
             children: [
               Expanded(
                 child: TextField(
                   controller: _searchController,
                   decoration: const InputDecoration(
-                    hintText: 'Search by name...',
                     prefixIcon: Icon(Icons.search),
+                    hintText: 'Search by name...',
                     border: OutlineInputBorder(
-                      borderRadius: BorderRadius.all(Radius.circular(25.0)),
+                      borderRadius: BorderRadius.all(Radius.circular(25)),
                     ),
                   ),
                 ),
@@ -264,23 +313,25 @@ class _LenderHomePageState extends State<LenderHomePage> {
           ),
         ),
 
-        // --- Asset Grid ---
         _isLoading
-            ? const Expanded(child: Center(child: CircularProgressIndicator()))
+            ? const Expanded(
+                child: Center(child: CircularProgressIndicator()),
+              )
             : Expanded(
-                child: GridView.builder(
-                  padding: const EdgeInsets.all(8.0),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 2,
-                    childAspectRatio: 0.8,
-                    crossAxisSpacing: 8,
-                    mainAxisSpacing: 8,
+                child: RefreshIndicator(
+                  onRefresh: _loadInitialData,
+                  child: GridView.builder(
+                    padding: const EdgeInsets.all(8),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 2,
+                      childAspectRatio: 0.8,
+                    ),
+                    itemCount: _filteredAssets.length,
+                    itemBuilder: (context, i) {
+                      return AssetCard(asset: _filteredAssets[i]);
+                    },
                   ),
-                  itemCount: _filteredAssets.length,
-                  itemBuilder: (context, index) {
-                    final asset = _filteredAssets[index];
-                    return AssetCard(asset: asset);
-                  },
                 ),
               ),
       ],
@@ -288,7 +339,6 @@ class _LenderHomePageState extends State<LenderHomePage> {
   }
 }
 
-// --- Custom Widget for the Asset Card ---
 class AssetCard extends StatelessWidget {
   final Map<String, dynamic> asset;
   const AssetCard({super.key, required this.asset});
@@ -296,67 +346,50 @@ class AssetCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final imageUrl = asset['image_url'];
-    final status = asset['status'] ?? 'unknown';
+    final status = (asset['status'] ?? '').toString();
 
-    return GestureDetector(
-      // The onTap is empty so the lender can't borrow.
-      onTap: () {},
-      child: Card(
-        elevation: 2,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // --- Image ---
-            Expanded(
-              child: Container(
-                decoration: BoxDecoration(
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(12),
-                    topRight: Radius.circular(12),
-                  ),
-                  color: Colors.grey[300],
+    return Card(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      elevation: 2,
+      child: Column(
+        children: [
+          Expanded(
+            child: imageUrl != null && imageUrl.isNotEmpty
+                ? ClipRRect(
+                    borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(12),
+                    ),
+                    child: Image.network(imageUrl, fit: BoxFit.cover),
+                  )
+                : const Icon(Icons.inventory_2,
+                    size: 60, color: Colors.grey),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Column(
+              children: [
+                Text(
+                  asset['name'] ?? 'No Name',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
-                child: (imageUrl != null && imageUrl.isNotEmpty)
-                    ? Image.network(imageUrl, fit: BoxFit.cover)
-                    : const Icon(
-                        Icons.inventory_2,
-                        size: 50,
-                        color: Colors.grey,
-                      ),
-              ),
+                StatusTag(status: status),
+              ],
             ),
-
-            // --- Title & Status ---
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: Column(
-                children: [
-                  Text(
-                    asset['name'] ?? 'No Name',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 4),
-                  StatusTag(status: status),
-                ],
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 }
 
-// --- Custom Widget for the Status Tag ---
 class StatusTag extends StatelessWidget {
   final String status;
   const StatusTag({super.key, required this.status});
 
-  Color _getColor(String status) {
-    switch (status) {
+  Color _color() {
+    switch (status.toLowerCase()) {
       case 'available':
         return Colors.green;
       case 'borrowed':
@@ -372,18 +405,19 @@ class StatusTag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final c = _color();
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: _getColor(status).withOpacity(0.2),
+        color: c.withOpacity(.2),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Text(
         status,
         style: TextStyle(
-          color: _getColor(status),
-          fontWeight: FontWeight.bold,
+          color: c,
           fontSize: 12,
+          fontWeight: FontWeight.bold,
         ),
       ),
     );
